@@ -1,128 +1,70 @@
 # hyperresearchbench
 
-**[DeepResearch-Bench](https://github.com/Ayanami0730/deep_research_bench) runner for Claude Code.**
+**Reproduction harness for hyperresearch's [DeepResearch-Bench](https://github.com/Ayanami0730/deep_research_bench) score.**
 
-Test any Claude Code research workflow against the same 100-query benchmark used to score Grep Deep Research, OpenAI Deep Research, Gemini Deep Research, and the public DRB leaderboard. Agent-agnostic — works with [hyperresearch](https://github.com/jordan-gibbs/hyperresearch), custom skills, or vanilla Claude Code.
+Runs the 100-query DRB benchmark against [hyperresearch](https://github.com/jordan-gibbs/hyperresearch) on Claude Code, full tier (16-step pipeline with adversarial review), Opus 4.7. Outputs a JSONL file ready for the upstream RACE + FACT evaluator.
 
-The harness:
+## Stack
 
-- Pulls the upstream 100-query benchmark (50 zh + 50 en, 22 fields, PhD-level prompts)
-- Runs each query through `claude -p` in an isolated per-query subdir
-- Mirrors your project's `.claude/` and `CLAUDE.md` into each subdir, so whatever skills + agents + hooks you have installed run for every query
-- Captures `research/notes/final_report*.md` as the deliverable
-- Writes a JSONL ready for the upstream RACE + FACT evaluator
-- Resume-safe; supports per-query limits, language filters, model pinning
+| Layer | Model | Role |
+|---|---|---|
+| Orchestrator | Opus 4.7 | Tier classification, pipeline routing, synthesis planning |
+| Critics (4×) | Opus 4.7 | Dialectic, depth, width, instruction adversarial review |
+| Synthesizer | Opus 4.7 | Two-pass write from 3 angle-specific drafts |
+| Patcher + polish auditor | Opus 4.7 | Tool-locked `[Read, Edit]` — surgical hunks only |
+| Loci-analysts, depth-investigators, draft sub-orchestrators, source-analyst | Sonnet 4.6 | Parallel reading + position-committing |
+| Fetchers | Haiku 4.5 | URL fetching via crawl4ai, 8–12 in parallel per wave |
 
-## Install
+Per-query wall-clock: **~1.5–2.5 hours** for full tier. Per-query cost: **~$60–120**.
+
+## Reproduce
 
 ```bash
 git clone https://github.com/jordan-gibbs/hyperresearchbench
 cd hyperresearchbench/DeepResearch-Bench
+
+# 1. One-command setup. Installs hyperresearch globally, clones upstream
+#    DRB, installs Gemini eval deps, downloads the 100 queries.
 bash setup.sh
+
+# 2. Smoke test — one query end-to-end (~1.5-2.5 hours, ~$60-120)
+python harness.py --query 67          # English, "RL exploration → trajectory planning"
+export GEMINI_API_KEY=<your-key>      # Get one at https://aistudio.google.com/apikey
+bash grade.sh --limit 1
+
+# 3. Full run (resume-safe; checkpoints to results/claude-research.jsonl)
+python harness.py                     # ~6-10 days wall-clock for 100 queries
+bash grade.sh                         # RACE + FACT
 ```
 
-Setup clones the upstream evaluator into `DeepResearch-Bench/deep_research_bench/`, installs the Gemini eval deps, and downloads the 100 benchmark queries.
+Reproduction expectations:
 
-You'll also need:
+- **`hyperresearch --version`** must report `0.8.5` or later
+- **`claude --version`** must work and be authenticated
+- **Python 3.11, 3.12, or 3.13** (3.14 unsupported pending upstream Crawl4AI fix; setup.sh refuses to run on 3.14)
+- A Gemini API key (Gemini-2.5-Pro for RACE, Gemini-2.5-Flash for FACT)
 
-- **Claude Code CLI** authenticated (`claude --version` should work). Get it at [claude.com/claude-code](https://claude.com/claude-code).
-- **Gemini API key** for grading. Get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Set it as `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+## What the harness does per query
 
-## Single-query smoke test (recommended first run)
+1. Mirrors your project's `.claude/` and `CLAUDE.md` into a fresh `runs/query_<id>/` subdir
+2. Runs `claude -p "Use the /hyperresearch skill on the FULL tier..."` with the benchmark prompt
+3. The agent in that subdir auto-bootstraps a hyperresearch vault (step 0), then walks the 16-step pipeline:
 
-```bash
-cd DeepResearch-Bench
+   ```
+   1. decompose                    9.  evidence digest
+   2. width sweep (40-100 sources) 10. triple-draft (3 parallel)
+   3. contradiction graph          11. synthesize (Opus, two-pass)
+   4. loci analysis                12. 4 adversarial critics (parallel)
+   5. depth investigation (K par.) 13. gap-fetch
+   6. cross-locus reconcile        14. patcher (Read+Edit only)
+   7. source tensions              15. polish (Read+Edit only)
+   8. corpus critic                16. readability audit
+   ```
 
-# 1. Run query #67 (English, RL exploration → trajectory planning) on Sonnet
-python harness.py --query 67 --model sonnet
+4. Reads the resulting `research/notes/final_report_<vault_tag>.md`
+5. Appends one JSON record per query to `results/claude-research.jsonl`
 
-# 2. Grade it (RACE only, no web-scrape)
-export GEMINI_API_KEY=<your-key>
-bash grade.sh --skip-fact --limit 1
-
-# 3. Result: results/claude-research_score.json
-cat results/claude-research_score.json
-```
-
-Expected wall-clock: 3–8 min for the harness run, 1–2 min for grading. Total cost: ~$1–2 per query (depends on agent workflow).
-
-A successful smoke test confirms:
-
-- Claude Code is authenticated and reachable
-- Your project's research workflow writes `research/notes/final_report*.md` correctly
-- Gemini API key is valid
-- The grading pipeline returns a score
-
-## Full 100-query run
-
-```bash
-cd DeepResearch-Bench
-
-# 1. Generate results (resume-safe; restartable on crash)
-python harness.py --resume                       # ~1.5–2.5 hours per query for hyperresearch full tier
-                                                 # ~3–8 min per query for vanilla Claude Code
-
-# 2. Grade (RACE + FACT)
-export GEMINI_API_KEY=<your-key>
-bash grade.sh                                    # both RACE and FACT (FACT scrapes citation URLs — slow)
-bash grade.sh --skip-fact                        # RACE only (faster, no web-scrape)
-```
-
-Expected total cost ranges:
-- **vanilla Claude Code**: ~$50–100 (1× $0.50–1 per query)
-- **hyperresearch full tier**: ~$6,000–12,000 (100× $60–120 per query) — full pipeline with adversarial review
-- **hyperresearch light tier**: ~$500–1,500 (100× $5–15 per query)
-
-Results land in `results/claude-research.jsonl` (raw outputs) and `results/claude-research_score.json` (RACE/FACT scores).
-
-## Configuring the agent under test
-
-The harness is **agent-agnostic** — it just runs `claude -p <prompt>` and reads the resulting `research/notes/final_report*.md`. Whatever your `.claude/skills/`, `.claude/agents/`, `.claude/settings.json`, and `CLAUDE.md` contain at `--project-root` (default: parent of this repo) is what the harness mirrors into each per-query subdir.
-
-**Three ways to use it:**
-
-### Option A — Test hyperresearch (recommended)
-
-Install [hyperresearch](https://github.com/jordan-gibbs/hyperresearch) globally:
-
-```bash
-pip install hyperresearch
-hyperresearch install --global
-```
-
-Then point the harness at any project that has hyperresearch installed:
-
-```bash
-# From a project where you've run `hyperresearch install`
-cd /path/to/your-project
-python /path/to/hyperresearchbench/DeepResearch-Bench/harness.py \
-    --project-root . \
-    --query 67
-```
-
-The harness mirrors `.claude/` from your project (which has the hyperresearch skill files) into each per-query subdir. Each subdir auto-creates its own `research/` vault on first run because hyperresearch's bootstrap step handles it.
-
-### Option B — Test a custom Claude Code skill
-
-If you have your own research skill at `.claude/skills/my-research/SKILL.md`, point the harness at that project:
-
-```bash
-python harness.py --project-root /path/to/your-project --limit 1
-```
-
-The harness will copy `.claude/` and `CLAUDE.md` from `your-project` into each per-query subdir. Your skill needs to write the final report to `research/notes/final_report*.md`.
-
-### Option C — Test vanilla Claude Code
-
-Point the harness at any project (or a project root with no `.claude/` at all). Claude Code will use only the built-in tools (WebSearch, WebFetch, etc.). Results will be much faster but less rigorous than a hyperresearch run.
-
-```bash
-python harness.py --project-root /tmp/empty-dir --limit 1
-```
-
-## Output format
-
-`results/claude-research.jsonl` — one JSON object per query:
+## Output JSONL schema
 
 ```json
 {
@@ -138,36 +80,59 @@ python harness.py --project-root /tmp/empty-dir --limit 1
 }
 ```
 
-`results/claude-research_score.json` — RACE + FACT aggregate scores after grading.
+The schema matches the upstream DRB evaluator's expected format. `grade.sh` copies the file into `deep_research_bench/data/results/` and invokes `python -m race.eval` and `python -m fact.eval` (FACT scrapes citation URLs to verify them).
 
-## Harness CLI reference
+## Single-query smoke test details
 
-```
-python harness.py --setup                       # Download benchmark queries (~50 KB)
-python harness.py                               # Run all 100 queries
-python harness.py --limit N                     # Run only the first N
-python harness.py --query <id>                  # Run a specific query (1–100)
-python harness.py --lang en | --lang zh         # Filter by language (50 each)
-python harness.py --resume                      # Skip queries already in JSONL
-python harness.py --model sonnet | opus | haiku # Model alias (default: opus)
-python harness.py --timeout 1800                # Per-query timeout in seconds (default: 3600)
-python harness.py --output my-experiment        # Write to results/my-experiment.jsonl
-python harness.py --runs-dir /path/to/runs      # Where to put per-query workdirs
-python harness.py --project-root /path/to/proj  # Project whose .claude/ to mirror in
+```bash
+python harness.py --query 67 --timeout 10800
 ```
 
-## Troubleshooting
+`--query 67` is the canonical English query for smoke-testing — it's the one we used as our public sample report at https://github.com/jordan-gibbs/hyperresearch/blob/main/example-reports/rl-exploration-trajectory-planning.md (graded 58.3/100 in the V8.3 stratified pilot). Anyone reproducing should expect to land within ±2 points of that score.
 
-**"No final_report*.md found for query N"** — the agent didn't write a report. Check the run subdir at `runs/query_N/` to see what happened. Common causes: timeout (try `--timeout 7200`), the agent's research workflow doesn't write to `research/notes/`, or a skill is broken.
+`--timeout 10800` is 3 hours — defensive, since full tier on a research-heavy query can run long when fetcher waves hit slow sources.
 
-**"Pre-rename architecture leaks"** in the report — your project has an old hyperresearch version. Upgrade with `pip install --upgrade hyperresearch && hyperresearch install`.
+After the run, `runs/query_67/research/notes/final_report_*.md` is the deliverable. `results/claude-research.jsonl` has the JSONL entry.
 
-**Gemini rate limits during grading** — the upstream evaluator pauses and retries automatically. If it fails permanently, run `bash grade.sh --limit 10` repeatedly until done; results are append-only.
+## Resuming after interruption
 
-**Out-of-quota mid-run** — `--resume` is your friend. The harness skips queries already in the output JSONL, so you can fix billing and continue.
+The harness is resume-safe via `--resume`. Reads `results/claude-research.jsonl`, builds a set of completed query IDs, skips them on the next run.
+
+```bash
+python harness.py --resume
+```
+
+Worth knowing:
+
+- **API rate limits / quotas** — if Anthropic billing pauses mid-run, fix the billing, then `python harness.py --resume`. Already-completed queries are not re-run.
+- **Timeouts** — if a query hits `--timeout`, it's NOT recorded as completed. The next `--resume` will retry it. Bump `--timeout` if certain queries consistently hit the cap.
+- **Manual recovery** — every per-query subdir at `runs/query_<id>/` is a complete hyperresearch project (vault, sources, scaffold, drafts, critic findings). If a query crashed mid-pipeline (e.g., during step 15), you can `cd` in and inspect / manually finish.
+
+## CLI reference
+
+```
+python harness.py --setup                # Download benchmark queries
+python harness.py                        # Run all 100 queries
+python harness.py --limit N              # Run only the first N
+python harness.py --query <id>           # Run a specific query (1-100)
+python harness.py --lang en | --lang zh  # Filter by language (50 each)
+python harness.py --resume               # Skip queries already in JSONL
+python harness.py --model opus           # Default; can also pass sonnet or haiku
+python harness.py --timeout 10800        # Per-query timeout in seconds (default 3600)
+python harness.py --output run-name      # Write to results/run-name.jsonl
+
+bash grade.sh                            # RACE + FACT on results/claude-research.jsonl
+bash grade.sh my-run                     # Grade results/my-run.jsonl
+bash grade.sh --skip-fact                # RACE only (no citation web-scraping)
+bash grade.sh --limit 5                  # Grade first 5 entries only
+```
+
+## Hyperresearch's published score
+
+V8.3 stratified pilot (n = 9 queries, full reference-strength distribution): **57.77 average overall**, beating xiaoyi (DRB #1 on the public leaderboard at the time) by 0.77 points.
+
+Full 100-query reproduction is what this harness exists to enable.
 
 ## License
 
-MIT. Same as the parent project [hyperresearch](https://github.com/jordan-gibbs/hyperresearch).
-
-The upstream [DeepResearch-Bench](https://github.com/Ayanami0730/deep_research_bench) repo (cloned by `setup.sh` into `DeepResearch-Bench/deep_research_bench/`) is licensed separately by its authors.
+MIT. The upstream [DeepResearch-Bench](https://github.com/Ayanami0730/deep_research_bench) repo (cloned by `setup.sh` into `DeepResearch-Bench/deep_research_bench/`) is licensed separately by its authors.

@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
-"""DeepResearch-Bench harness for Claude Code agents.
+"""DeepResearch-Bench harness for hyperresearch on Claude Code.
 
-Runs the 100 benchmark queries through `claude -p` (Claude Code CLI in
-non-interactive mode), captures the resulting research reports, and writes
-JSONL ready for RACE/FACT evaluation.
+Runs the 100 benchmark queries through `claude -p` invoking the
+`/hyperresearch` skill on its full tier (16-step pipeline with
+adversarial review), captures the resulting research reports, and
+writes JSONL ready for RACE/FACT evaluation.
 
-Agent-agnostic. Whatever your Claude Code project has installed (a custom
-research skill, hyperresearch, vanilla Claude Code with WebSearch/WebFetch,
-etc.), the harness just passes the query, waits for `research/notes/final_report*.md`
-to land, and records what came back. The harness does NOT inject any
-particular research workflow — that's controlled by your project's
-`.claude/`, `CLAUDE.md`, and `.claude/skills/` setup.
+This is the canonical reproduction harness for hyperresearch's
+DeepResearch-Bench leaderboard score. To reproduce: run
+`bash setup.sh` then `python harness.py` (or `bash run.sh` which
+wraps both). Each query runs on Opus 4.7 (orchestrator + critics +
+synthesizer + patcher), Sonnet 4.6 (loci-analysts, depth-investigators,
+draft sub-orchestrators, source-analyst), and Haiku 4.5 (fetchers).
 
 Usage:
     python harness.py --setup                     # Download benchmark queries
-    python harness.py --limit 1                   # Single-query smoke test
-    python harness.py --limit 1 --query 67        # Run a specific query ID
-    python harness.py                             # Full 100-query run
+    python harness.py --query 67                  # Single-query smoke test
+    python harness.py                             # Full 100-query run (~1.5-2.5h per query)
     python harness.py --resume                    # Resume from last checkpoint
     python harness.py --lang en                   # English queries only (50)
-    python harness.py --model sonnet              # Use Sonnet instead of Opus
-    python harness.py --timeout 1800              # 30-min per-query cap
+    python harness.py --timeout 10800             # 3-hour per-query cap
 
-Prerequisites:
+Prerequisites (all handled by `bash setup.sh`):
     - Claude Code CLI installed and authenticated (`claude --version`)
-    - Whatever research workflow you want to test, configured in your
-      project (the harness runs `claude -p` in a fresh per-query subdir
-      that inherits the parent project's .claude/ + CLAUDE.md by default)
+    - hyperresearch installed globally (`pip install hyperresearch && hyperresearch install --global`)
+    - Benchmark queries downloaded
 """
 
 from __future__ import annotations
@@ -60,13 +58,18 @@ QUERY_URL = (
 DEFAULT_RUNS_DIR = HERE / "runs"
 DEFAULT_RESULTS_DIR = HERE / "results"
 
-# Generic prompt: ask for a comprehensive report with inline URL citations
-# and a stable output path. The agent's actual research methodology comes
-# from whatever skill the user has installed — not from this prompt.
+# Prompt explicitly invokes /hyperresearch on the full tier so step 1's
+# tier classifier doesn't downgrade short-prompt queries. Save path is
+# the v0.8.5+ vault_tag-suffixed form; the harness reads the most-
+# recently-modified file matching `final_report*.md`.
 RESEARCH_PROMPT = """\
-Research this topic and write a comprehensive report with inline URL citations: {prompt}
+Use the `/hyperresearch` skill on the FULL tier (the 16-step pipeline with adversarial review) to research this topic and write a comprehensive report with inline citations:
 
-Save your final report to research/notes/final_report.md (or research/notes/final_report_<slug>.md, relative to the current working directory). The harness reads the most-recently-modified file matching that glob.
+{prompt}
+
+When step 1 (decompose) classifies the query, override `pipeline_tier` to `"full"` regardless of the query length — this is a benchmark run that requires the full pipeline.
+
+Save your final report to `research/notes/final_report_<vault_tag>.md` (relative to the current working directory). The harness reads the most-recently-modified file matching `research/notes/final_report*.md`.
 """
 
 
