@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Per-query run artifacts (huge — vault contents, raw PDFs)
+DeepResearch-Bench/runs/
+DeepResearch-Bench/runs_*/
+
+# Upstream DRB clone (re-cloned by setup.sh)
+DeepResearch-Bench/deep_research_bench/
+
+# Eval outputs
+DeepResearch-Bench/results/*.jsonl
+DeepResearch-Bench/results/*_score.json
+DeepResearch-Bench/results/raw_*/
+DeepResearch-Bench/results/cleaned_*/
+
+# Local notes
+.idea/
+.vscode/
+*.log
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
