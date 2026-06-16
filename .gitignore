@@ -12,6 +12,9 @@ DeepResearch-Bench/runs_*/
 # Upstream DRB clone (re-cloned by setup.sh)
 DeepResearch-Bench/deep_research_bench/
 
+# Original-hyperresearch checkout (re-cloned by compare.sh; has its own .git)
+DeepResearch-Bench/.original_checkout/
+
 # Eval outputs
 DeepResearch-Bench/results/*.jsonl
 DeepResearch-Bench/results/*_score.json
