@@ -33,8 +33,10 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -44,8 +46,11 @@ from pathlib import Path
 # messages. Reconfigure stdout/stderr to UTF-8 with replacement so the
 # harness never crashes mid-run on a print statement.
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # line_buffering=True so progress reaches a redirected log in real time.
+    # Block buffering (the default to a pipe/file) is what made a dead run look
+    # identical to a busy one — the log simply stopped, with no way to tell why.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data"
@@ -149,6 +154,51 @@ def _read_report(run_dir: Path) -> str | None:
     return candidates[0].read_text(encoding="utf-8")
 
 
+HEARTBEAT_INTERVAL_S = 20  # how often the heartbeat thread refreshes status + log
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """SIGTERM then SIGKILL the subprocess's whole process group.
+
+    claude spawns subagents/fetchers as child processes; killing only the
+    leader on timeout would orphan them. start_new_session=True puts the whole
+    tree in its own process group so killpg reaps all of it.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        return
+    for _ in range(30):  # ~3s grace before the hammer
+        if proc.poll() is not None:
+            return
+        time.sleep(0.1)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _write_status(run_dir: Path, status: dict) -> None:
+    """Atomically write the per-query heartbeat/status JSON.
+
+    An external watcher (or a human) reads harness-status.json to know whether a
+    run is alive WITHOUT guessing from vault mtimes: a frozen `heartbeat_iso`
+    means the harness process is gone; a frozen `last_event_iso` with a fresh
+    `heartbeat_iso` means claude is alive but stalled.
+    """
+    status_path = run_dir / "harness-status.json"
+    tmp = status_path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(status_path)
+    except OSError:
+        pass
+
+
 def run_query(
     query: dict,
     run_dir: Path,
@@ -156,16 +206,25 @@ def run_query(
     timeout: int = 3600,
     model: str = "opus",
 ) -> tuple[str | None, int, int, float]:
-    """Run a single benchmark query through `claude -p`.
+    """Run a single benchmark query through `claude -p`, streaming its output.
 
-    Returns:
-        (article, prompt_tokens, completion_tokens, duration_seconds)
-        article is None if the agent didn't write a report.
+    Unlike a buffered subprocess.run(), this streams the claude stream-json
+    events line-by-line so that:
+      * harness-query.log shows real-time, timestamped progress,
+      * a heartbeat thread refreshes harness-status.json every
+        HEARTBEAT_INTERVAL_S seconds — a stall or death is then visible
+        immediately instead of looking identical to a long-running step,
+      * the full raw event stream is persisted to claude-stream.jsonl for
+        post-hoc debugging + token accounting,
+      * a timeout kills the whole claude process group (subagents included)
+        and is recorded as a distinct `timeout` state.
+
+    Returns (article, prompt_tokens, completion_tokens, duration_seconds);
+    article is None if the agent didn't write a report.
     """
     _setup_run_dir(parent_project, run_dir)
 
     prompt_text = RESEARCH_PROMPT.format(prompt=query["prompt"])
-
     cmd = [
         "claude", "-p", prompt_text,
         "--model", model,
@@ -178,40 +237,147 @@ def run_query(
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
 
+    qid = int(query.get("id", 0))
+    qlog = (run_dir / "harness-query.log").open("a", encoding="utf-8", buffering=1)
+    raw = (run_dir / "claude-stream.jsonl").open("a", encoding="utf-8", buffering=1)
+
+    def qprint(msg: str) -> None:
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        qlog.write(f"[{ts}] {msg}\n")
+
+    state = {
+        "query_id": qid, "state": "starting", "model": model, "pid": None,
+        "start_iso": datetime.now(timezone.utc).isoformat(), "start_mono": time.time(),
+        "last_event_iso": None, "last_event_type": None, "last_tool": None,
+        "events": 0, "tool_calls": 0, "tool_counts": {},
+        "prompt_tokens": 0, "completion_tokens": 0, "timeout_s": timeout,
+    }
+    lock = threading.Lock()
+    stop_heartbeat = threading.Event()
+    deadline = time.time() + timeout
+    timed_out = {"flag": False}
+
+    def snapshot() -> dict:
+        with lock:
+            s = dict(state)
+            s["tool_counts"] = dict(state["tool_counts"])
+        s["elapsed_s"] = round(time.time() - state["start_mono"], 1)
+        s["heartbeat_iso"] = datetime.now(timezone.utc).isoformat()
+        report = _read_report(run_dir)
+        s["report_found"] = report is not None
+        s["report_chars"] = len(report) if report else 0
+        s["tool_counts"] = dict(sorted(s["tool_counts"].items(), key=lambda kv: -kv[1])[:6])
+        s.pop("start_mono", None)
+        return s
+
+    def heartbeat_loop(proc: subprocess.Popen) -> None:
+        # Wake frequently (<=5s) so the timeout is enforced promptly even when a
+        # blocked read would otherwise outlive the deadline, but only emit a
+        # heartbeat line / status refresh every HEARTBEAT_INTERVAL_S.
+        last_hb = 0.0
+        tick = min(5.0, HEARTBEAT_INTERVAL_S)
+        while not stop_heartbeat.wait(tick):
+            now = time.time()
+            if now >= deadline and proc.poll() is None:
+                timed_out["flag"] = True
+                qprint(f"TIMEOUT after {timeout}s — killing claude process group")
+                _kill_group(proc)
+                return
+            if now - last_hb >= HEARTBEAT_INTERVAL_S:
+                last_hb = now
+                s = snapshot()
+                _write_status(run_dir, s)
+                qprint(f"HEARTBEAT elapsed={s['elapsed_s']:.0f}s events={s['events']} "
+                       f"tools={s['tool_calls']} tok={s['prompt_tokens']}p+{s['completion_tokens']}c "
+                       f"last={s['last_event_type']}/{s['last_tool']} "
+                       f"report={'Y' if s['report_found'] else 'n'}")
+
     start = time.time()
+    qprint(f"START query {qid} model={model} timeout={timeout}s")
+    _write_status(run_dir, snapshot())
+
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True, text=True,
-            timeout=timeout,
-            cwd=str(run_dir),
-            env=env,
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, cwd=str(run_dir), env=env,
+            start_new_session=True,  # own process group → clean group-kill on timeout
         )
-    except subprocess.TimeoutExpired:
-        duration = time.time() - start
-        # Even on timeout, the agent may have written the report before timing out
-        article = _read_report(run_dir)
-        return article, 0, 0, duration
+    except FileNotFoundError:
+        qprint("ERROR: `claude` not found on PATH — generation cannot start")
+        with lock:
+            state["state"] = "error_no_claude"
+        _write_status(run_dir, snapshot())
+        qlog.close(); raw.close()
+        return None, 0, 0, 0.0
+
+    with lock:
+        state["pid"], state["state"] = proc.pid, "generating"
+    _write_status(run_dir, snapshot())
+
+    hb = threading.Thread(target=heartbeat_loop, args=(proc,), daemon=True)
+    hb.start()
+
+    try:
+        for line in proc.stdout:
+            raw.write(line)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = rec.get("type")
+            with lock:
+                state["events"] += 1
+                state["last_event_type"] = etype
+                state["last_event_iso"] = datetime.now(timezone.utc).isoformat()
+                usage = rec.get("usage") or rec.get("message", {}).get("usage")
+                if usage:
+                    state["prompt_tokens"] += usage.get("input_tokens", 0)
+                    state["completion_tokens"] += usage.get("output_tokens", 0)
+                if etype == "assistant":
+                    for block in rec.get("message", {}).get("content", []) or []:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            name = block.get("name", "?")
+                            state["tool_calls"] += 1
+                            state["tool_counts"][name] = state["tool_counts"].get(name, 0) + 1
+                            state["last_tool"] = name
+                            qprint(f"tool_use: {name}")
+            if etype == "result":
+                qprint(f"RESULT subtype={rec.get('subtype')} is_error={rec.get('is_error')} "
+                       f"cost_usd={rec.get('total_cost_usd')} turns={rec.get('num_turns')}")
+    except Exception as e:  # never let a read hiccup mask the run
+        qprint(f"stream read error: {type(e).__name__}: {e}")
+    finally:
+        rc = proc.wait()
+        stop_heartbeat.set()
+        hb.join(timeout=2)
 
     duration = time.time() - start
     article = _read_report(run_dir)
+    with lock:
+        ptok, ctok = state["prompt_tokens"], state["completion_tokens"]
 
-    # Best-effort token accounting from stream-json
-    prompt_tokens = completion_tokens = 0
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        usage = rec.get("usage") or rec.get("message", {}).get("usage")
-        if usage:
-            prompt_tokens += usage.get("input_tokens", 0)
-            completion_tokens += usage.get("output_tokens", 0)
+    if timed_out["flag"]:
+        final_state = "timeout"
+    elif rc is not None and rc < 0:
+        final_state = f"killed_signal_{-rc}"
+    elif rc not in (0, None):
+        final_state = f"exit_{rc}"
+    else:
+        final_state = "completed" if article else "no_report"
 
-    return article, prompt_tokens, completion_tokens, duration
+    with lock:
+        state["state"], state["returncode"] = final_state, rc
+    final = snapshot()
+    final["duration_s"] = round(duration, 1)
+    _write_status(run_dir, final)
+    qprint(f"END state={final_state} rc={rc} duration={duration:.0f}s "
+           f"report_chars={final['report_chars']} tok={ptok}p+{ctok}c")
+    qlog.close(); raw.close()
+
+    return article, ptok, ctok, duration
 
 
 def main() -> None:
@@ -283,7 +449,8 @@ def main() -> None:
     for i, q in enumerate(pending_queries, 1):
         qid = int(q["id"])
         prompt_preview = q["prompt"][:100].replace("\n", " ")
-        print(f"=== [{i}/{len(pending_queries)}] Query {qid} ({q.get('language')}) ===")
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        print(f"=== [{i}/{len(pending_queries)}] Query {qid} ({q.get('language')}) @ {ts} ===")
         print(f"    {prompt_preview}...")
 
         run_dir = runs_dir / f"query_{qid}"
@@ -300,7 +467,17 @@ def main() -> None:
             continue
 
         if not article:
-            print(f"[FAIL] No final_report*.md found for query {qid} (duration: {dur:.0f}s)")
+            # Surface the distinct failure mode the streaming run recorded
+            # (timeout / killed_signal_N / exit_N / no_report) rather than a
+            # generic "no report", and point at the per-query diagnostics.
+            final_state = "unknown"
+            try:
+                st = json.loads((run_dir / "harness-status.json").read_text(encoding="utf-8"))
+                final_state = st.get("state", "unknown")
+            except (OSError, json.JSONDecodeError):
+                pass
+            print(f"[FAIL] Query {qid}: no report (state={final_state}, duration={dur:.0f}s). "
+                  f"See {run_dir}/harness-query.log and harness-status.json")
             continue
 
         result = {
@@ -322,7 +499,14 @@ def main() -> None:
         print()
 
     print(f"[DONE] Results: {out_path}")
-    print(f"       Total: {sum(1 for _ in out_path.open(encoding='utf-8'))} entries")
+    if out_path.exists():
+        print(f"       Total: {sum(1 for _ in out_path.open(encoding='utf-8'))} entries")
+    else:
+        # No query produced a report (e.g. all timed out) so the JSONL was never
+        # created. Exit cleanly with a clear note instead of crashing on open() —
+        # a crash here would abort the whole compare.sh run under `set -e`.
+        print("       Total: 0 entries — no reports produced "
+              "(check each runs/*/query_*/harness-status.json for the failure state)")
 
 
 if __name__ == "__main__":
