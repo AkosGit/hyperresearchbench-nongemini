@@ -32,6 +32,10 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# Load secrets (MISTRAL_API_KEY, JINA_API_KEY) from a gitignored .env if present.
+[ -f "$HERE/.env" ] && { set -a; . "$HERE/.env"; set +a; }
+
 DRB_REPO="$HERE/deep_research_bench"
 RESULTS_DIR="$HERE/results"
 RESULTS_NAME="claude-research"

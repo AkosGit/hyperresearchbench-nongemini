@@ -54,6 +54,10 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# Load secrets (MISTRAL_API_KEY, JINA_API_KEY) from a gitignored .env if present,
+# so keys never have to be passed inline (and never land in the repo / on GitHub).
+[ -f "$HERE/.env" ] && { set -a; . "$HERE/.env"; set +a; }
+
 # ── Defaults ───────────────────────────────────────────────────────
 FORK_PATH="$(cd "$HERE/../../hyperresearch" 2>/dev/null && pwd || true)"
 ORIGINAL="https://github.com/jordan-gibbs/hyperresearch.git"

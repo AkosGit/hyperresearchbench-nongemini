@@ -1,3 +1,9 @@
+# Secrets — NEVER commit. API keys live in a local .env, auto-loaded by
+# compare.sh / grade.sh. Keep keys out of the repo and off GitHub.
+.env
+*.env
+DeepResearch-Bench/.env
+
 # Python
 __pycache__/
 *.py[cod]

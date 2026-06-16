@@ -21,7 +21,7 @@ Models chosen per your selection: **RACE = `mistral-large-latest` (Large 3), FAC
 cd hyperresearchbench-nongemini/DeepResearch-Bench
 bash setup.sh
 
-export MISTRAL_API_KEY=HFp7Z75kROZDaMxJrZ4zdhEdf9iY6f2r
+export MISTRAL_API_KEY=<your-mistral-key>
 export JINA_API_KEY=<your-jina-key>      # FACT citation scraping; omit + use --skip-fact
 
 # Benchmark your fork vs. jordan-gibbs/hyperresearch on queries 67 + 52
