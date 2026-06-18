@@ -130,6 +130,11 @@ cd "$DRB_REPO"
 if [ -n "$FORCE_ARG" ]; then
     echo "[FORCE] clearing prior RACE/FACT intermediates for ${RESULTS_NAME}"
     rm -rf "results/race/${RESULTS_NAME}" "results/fact/${RESULTS_NAME}"
+    # The cleaned target articles are ALSO resumed-from and the RACE scorer
+    # iterates them, so a stale query set here re-contaminates even after the
+    # above wipe. Drop them (NEVER reference.jsonl) so they re-clean from the
+    # current 3-record raw_data.
+    rm -f "data/test_data/cleaned_data/${RESULTS_NAME}.jsonl"
 fi
 
 # ── Step 1: RACE — report quality (cleans articles, then pairwise scores) ──

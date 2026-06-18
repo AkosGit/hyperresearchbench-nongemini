@@ -25,6 +25,7 @@ DRB_REPO="$HERE/deep_research_bench"
 DRB_URL="https://github.com/Ayanami0730/deep_research_bench.git"
 MISTRAL_PATCH="$HERE/patches/api_mistral.py"
 EXTRACT_PATCH="$HERE/patches/extract_robust.py"
+RACE_PATCH="$HERE/patches/deepresearch_bench_race_detailed.py"
 
 echo "=== hyperresearchbench setup (Mistral evaluator) ==="
 echo ""
@@ -74,6 +75,15 @@ echo "[OK] RACE=mistral-large-latest  FACT=mistral-small-latest (override via RA
 if [ -f "$EXTRACT_PATCH" ]; then
     echo "[PATCH] Installing robust FACT extractor → deep_research_bench/utils/extract.py"
     cp "$EXTRACT_PATCH" "$DRB_REPO/utils/extract.py"
+fi
+
+# Detailed RACE scorer: persists the full per-criterion judge breakdown
+# (dimension weights, target/reference dimension scores, and each criterion's
+# scores + reasoning) into raw_results.jsonl, instead of only the per-query
+# aggregate. Lets you inspect a single RACE test criterion-by-criterion.
+if [ -f "$RACE_PATCH" ]; then
+    echo "[PATCH] Installing detailed RACE scorer → deep_research_bench/deepresearch_bench_race.py"
+    cp "$RACE_PATCH" "$DRB_REPO/deepresearch_bench_race.py"
 fi
 
 # Step 4: Install eval dependencies (Mistral client uses plain `requests`)
