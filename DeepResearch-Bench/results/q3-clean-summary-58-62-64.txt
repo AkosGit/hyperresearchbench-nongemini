@@ -1,0 +1,19 @@
+CLEAN 3-query comparison — queries 58, 62, 64  (Q67 excluded; fork=band-1-improvements vs jordan-gibbs original)
+Mistral-graded (RACE=mistral-large, FACT=mistral-small). n=3.
+
+RACE metric                   fork  original  Δ(fork-orig)
+----------------------------------------------------------
+Comprehensiveness           0.5112    0.5007       +0.0106
+Insight                     0.5626    0.5609       +0.0017
+Instruction Following       0.5183    0.5274       -0.0091
+Readability                 0.5094    0.5099       -0.0005
+Overall Score               0.5323    0.5300       +0.0023
+
+FACT metric                   fork  original  Δ(fork-orig)
+----------------------------------------------------------
+total_citations            75.0000   73.3333       +1.6667
+total_valid_citations      43.6667   38.0000       +5.6667
+valid_rate                  0.5822    0.5182       +0.0640
+
+RACE overall: FORK wins (0.5323 vs 0.5300)
+FACT valid_rate: FORK wins (0.5822 vs 0.5182)

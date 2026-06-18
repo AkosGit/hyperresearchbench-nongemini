@@ -122,6 +122,16 @@ cp "$RESULTS_FILE" "$RAW_DATA_DIR/${RESULTS_NAME}.jsonl"
 QUERY_FILE="data/prompt_data/query.jsonl"
 cd "$DRB_REPO"
 
+# A forced re-grade must start from a clean slate. utils.extract (FACT) and the
+# RACE scorer both RESUME from these intermediates, so leftovers from a prior run
+# with a DIFFERENT query set silently contaminate the averages — e.g. a stale Q67
+# leaking into a 58/62/64 comparison and even flipping the verdict. compare.sh
+# passes --force on --fresh, so this also makes --fresh runs truly clean.
+if [ -n "$FORCE_ARG" ]; then
+    echo "[FORCE] clearing prior RACE/FACT intermediates for ${RESULTS_NAME}"
+    rm -rf "results/race/${RESULTS_NAME}" "results/fact/${RESULTS_NAME}"
+fi
+
 # ── Step 1: RACE — report quality (cleans articles, then pairwise scores) ──
 echo "=== RACE evaluation (mistral-large-latest pairwise judge) ==="
 RACE_OUT="results/race/${RESULTS_NAME}"
