@@ -26,6 +26,7 @@ DRB_URL="https://github.com/Ayanami0730/deep_research_bench.git"
 MISTRAL_PATCH="$HERE/patches/api_mistral.py"
 EXTRACT_PATCH="$HERE/patches/extract_robust.py"
 RACE_PATCH="$HERE/patches/deepresearch_bench_race_detailed.py"
+VALIDATE_PATCH="$HERE/patches/validate_with_reasoning.py"
 
 echo "=== hyperresearchbench setup (Mistral evaluator) ==="
 echo ""
@@ -84,6 +85,14 @@ fi
 if [ -f "$RACE_PATCH" ]; then
     echo "[PATCH] Installing detailed RACE scorer → deep_research_bench/deepresearch_bench_race.py"
     cp "$RACE_PATCH" "$DRB_REPO/deepresearch_bench_race.py"
+fi
+
+# FACT validator that also records a one-sentence reason per statement, so a
+# single FACT test can be inspected citation-by-citation (why each statement was
+# judged supported / unsupported / unknown), not just the aggregate valid_rate.
+if [ -f "$VALIDATE_PATCH" ]; then
+    echo "[PATCH] Installing FACT validator with reasoning → deep_research_bench/utils/validate.py"
+    cp "$VALIDATE_PATCH" "$DRB_REPO/utils/validate.py"
 fi
 
 # Step 4: Install eval dependencies (Mistral client uses plain `requests`)
